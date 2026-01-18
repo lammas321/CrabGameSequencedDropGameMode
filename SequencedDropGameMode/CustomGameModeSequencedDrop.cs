@@ -1,9 +1,12 @@
-﻿using BepInEx.IL2CPP.Utils;
+﻿using BepInEx;
+using BepInEx.IL2CPP.Utils;
+using CrabDevKit.Utilities;
 using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace SequencedDropGameMode
@@ -11,7 +14,7 @@ namespace SequencedDropGameMode
     public sealed class CustomGameModeSequencedDrop : CustomGameModes.CustomGameMode
     {
         internal static CustomGameModeSequencedDrop Instance;
-        internal static GameModeBlockDrop BlockDrop;
+        internal static Deobf_GameModeBlockDrop BlockDrop;
         internal static readonly string SequencesPath = "SequencedDropSequences\\";
         internal static readonly int MaxHeight = 26;
         internal static readonly float MinSpeed = 0.8f;
@@ -87,8 +90,8 @@ namespace SequencedDropGameMode
         (
             name: "Sequenced Drop",
             description: "• The blocks will drop in a sequence\n\n• You must survive for the entire sequence\n\n• Be respectful, no pushing >=(",
-            gameModeType: GameModeType.ColorDrop,
-            vanillaGameModeType: GameModeType.ColorDrop,
+            gameModeType: GameModeData_GameModeType.ColorDrop,
+            vanillaGameModeType: GameModeData_GameModeType.ColorDrop,
             waitForRoundOverToDeclareSoloWinner: true,
 
             shortModeTime: 100,
@@ -120,145 +123,148 @@ namespace SequencedDropGameMode
             sequences.Clear();
         }
 
+        private IEnumerable<string> ScrapeSequences(string directory)
+        {
+            return Directory.EnumerateDirectories(directory, "*", SearchOption.AllDirectories).Where(path => path.EndsWith("\\SequencedDropSequences"));
+        }
+
         internal void LoadSequences()
         {
-            string sequencedDropSequencesPath = Path.Combine(SequencedDropGameMode.PluginPath, SequencesPath);
-            if (!Directory.Exists(sequencedDropSequencesPath))
-                Directory.CreateDirectory(sequencedDropSequencesPath);
-
             sequences.Clear();
-            foreach (string file in Directory.GetFiles(sequencedDropSequencesPath))
-            {
-                string[] lines = File.ReadAllLines(file);
-                int sequencesIndex = -1;
-                for (int index = 0; index < lines.Length; index++)
-                    if (lines[index].Trim().ToLower() == "sequence:")
-                    {
-                        sequencesIndex = index;
-                        break;
-                    }
-                if (sequencesIndex == -1)
-                    continue;
 
-                string name = "Unnamed";
-                int height = 1;
-                int minPlayers = -1;
-                int maxPlayers = -1;
-                for (int index = 0; index < sequencesIndex; index++)
+            foreach (string path in ScrapeSequences(Paths.PluginPath))
+                foreach (string file in Directory.GetFiles(path, "*.txt", SearchOption.AllDirectories))
                 {
-                    string line = lines[index].Trim();
-                    if (line == "" || line.StartsWith('#'))
-                        continue;
-                    int splitIndex = line.IndexOf('=');
-                    if (splitIndex == -1)
+                    string[] lines = File.ReadAllLines(file);
+                    int sequencesIndex = -1;
+                    for (int index = 0; index < lines.Length; index++)
+                        if (lines[index].Trim().ToLower() == "sequence:")
+                        {
+                            sequencesIndex = index;
+                            break;
+                        }
+                    if (sequencesIndex == -1)
                         continue;
 
-                    string key = line[..splitIndex].ToLower();
-                    string value = line[(splitIndex + 1)..];
-
-                    switch (key)
+                    string name = "Unnamed";
+                    int height = 1;
+                    int minPlayers = -1;
+                    int maxPlayers = -1;
+                    for (int index = 0; index < sequencesIndex; index++)
                     {
-                        case "name":
-                            {
-                                name = value;
-                                break;
-                            }
-                        case "height":
-                            {
-                                if (int.TryParse(value, out int intValue))
-                                    height = Math.Max(1, intValue);
-                                break;
-                            }
-                        case "minplayers":
-                            {
-                                if (int.TryParse(value, out int intValue))
-                                    minPlayers = Math.Max(-1, intValue);
-                                break;
-                            }
-                        case "maxplayers":
-                            {
-                                if (int.TryParse(value, out int intValue))
-                                    maxPlayers = Math.Max(-1, intValue);
-                                break;
-                            }
-                    }
-                }
+                        string line = lines[index].Trim();
+                        if (line == "" || line.StartsWith('#'))
+                            continue;
+                        int splitIndex = line.IndexOf('=');
+                        if (splitIndex == -1)
+                            continue;
 
-                List<Instruction> instructions = [];
-                for (int index = sequencesIndex + 1; index < lines.Length; index++)
-                {
-                    string line = lines[index].Trim().ToLower();
-                    if (line == "" || line.StartsWith('#'))
-                        continue;
-                    int splitIndex = line.IndexOf('=');
-                    if (splitIndex == -1)
-                        continue;
+                        string key = line[..splitIndex].ToLower();
+                        string value = line[(splitIndex + 1)..];
 
-                    string key = line[..splitIndex];
-                    string value = line[(splitIndex + 1)..].Replace(" ", "");
-
-                    switch (key)
-                    {
-                        case "drop":
-                            {
-                                string[] properties = value.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                                if (properties.Length <= 1)
-                                    continue;
-
-                                if (!int.TryParse(properties[0], out int intValue))
-                                    break;
-                                if (float.TryParse(properties[1], out float floatValue))
-                                    instructions.Add(new(InstructionType.Drop, new InstructionDataDrop(IndexToDropPosition(Math.Clamp(intValue, 0, 15)), Math.Max(float.Epsilon, floatValue))));
-                                break;
-                            }
-                        case "multidrop":
-                            {
-                                if (!value.StartsWith('['))
-                                    break;
-                                int multiDropEndIndex = value.IndexOf(']');
-                                if (multiDropEndIndex == -1)
-                                    break;
-
-                                string[] multiDropIndexes = value[1..multiDropEndIndex].Split(',', StringSplitOptions.RemoveEmptyEntries);
-                                List<DropPosition> dropPositions = [];
-                                bool encounteredError = false;
-                                foreach (string dropIndexValue in multiDropIndexes)
+                        switch (key)
+                        {
+                            case "name":
                                 {
-                                    if (!int.TryParse(dropIndexValue, out int intValue))
-                                    {
-                                        encounteredError = true;
-                                        break;
-                                    }
-                                    dropPositions.Add(IndexToDropPosition(Math.Clamp(intValue, 0, 15)));
+                                    name = value;
+                                    break;
                                 }
-                                if (encounteredError)
+                            case "height":
+                                {
+                                    if (int.TryParse(value, out int intValue))
+                                        height = Math.Max(1, intValue);
                                     break;
-
-                                string[] properties = value[(multiDropEndIndex + 1)..].Split(',', StringSplitOptions.RemoveEmptyEntries);
-                                if (properties.Length == 0) continue;
-                                if (!float.TryParse(properties[0], out float floatValue))
+                                }
+                            case "minplayers":
+                                {
+                                    if (int.TryParse(value, out int intValue))
+                                        minPlayers = Math.Max(-1, intValue);
                                     break;
-                                int dropCount = 1;
-                                if (properties.Length >= 2 && !int.TryParse(properties[1], out dropCount))
+                                }
+                            case "maxplayers":
+                                {
+                                    if (int.TryParse(value, out int intValue))
+                                        maxPlayers = Math.Max(-1, intValue);
                                     break;
-                                float waitTime = 1f;
-                                if (properties.Length >= 3 && !float.TryParse(properties[2], out waitTime))
-                                    break;
-
-                                instructions.Add(new(InstructionType.MultiDrop, new InstructionDataMultiDrop([.. dropPositions], Math.Max(float.Epsilon, floatValue), Math.Max(1, dropCount), Math.Max(float.Epsilon, waitTime))));
-                                break;
-                            }
-                        case "wait":
-                            {
-                                if (float.TryParse(value, out float floatValue))
-                                    instructions.Add(new(InstructionType.Wait, new InstructionDataWait(Math.Max(float.Epsilon, floatValue))));
-                                break;
-                            }
+                                }
+                        }
                     }
-                }
 
-                sequences.Add(new(name, height, minPlayers, maxPlayers, [.. instructions]));
-            }
+                    List<Instruction> instructions = [];
+                    for (int index = sequencesIndex + 1; index < lines.Length; index++)
+                    {
+                        string line = lines[index].Trim().ToLower();
+                        if (line == "" || line.StartsWith('#'))
+                            continue;
+                        int splitIndex = line.IndexOf('=');
+                        if (splitIndex == -1)
+                            continue;
+
+                        string key = line[..splitIndex];
+                        string value = line[(splitIndex + 1)..].Replace(" ", "");
+
+                        switch (key)
+                        {
+                            case "drop":
+                                {
+                                    string[] properties = value.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                                    if (properties.Length <= 1)
+                                        continue;
+
+                                    if (!int.TryParse(properties[0], out int intValue))
+                                        break;
+                                    if (float.TryParse(properties[1], out float floatValue))
+                                        instructions.Add(new(InstructionType.Drop, new InstructionDataDrop(IndexToDropPosition(Math.Clamp(intValue, 0, 15)), Math.Max(float.Epsilon, floatValue))));
+                                    break;
+                                }
+                            case "multidrop":
+                                {
+                                    if (!value.StartsWith('['))
+                                        break;
+                                    int multiDropEndIndex = value.IndexOf(']');
+                                    if (multiDropEndIndex == -1)
+                                        break;
+
+                                    string[] multiDropIndexes = value[1..multiDropEndIndex].Split(',', StringSplitOptions.RemoveEmptyEntries);
+                                    List<DropPosition> dropPositions = [];
+                                    bool encounteredError = false;
+                                    foreach (string dropIndexValue in multiDropIndexes)
+                                    {
+                                        if (!int.TryParse(dropIndexValue, out int intValue))
+                                        {
+                                            encounteredError = true;
+                                            break;
+                                        }
+                                        dropPositions.Add(IndexToDropPosition(Math.Clamp(intValue, 0, 15)));
+                                    }
+                                    if (encounteredError)
+                                        break;
+
+                                    string[] properties = value[(multiDropEndIndex + 1)..].Split(',', StringSplitOptions.RemoveEmptyEntries);
+                                    if (properties.Length == 0) continue;
+                                    if (!float.TryParse(properties[0], out float floatValue))
+                                        break;
+                                    int dropCount = 1;
+                                    if (properties.Length >= 2 && !int.TryParse(properties[1], out dropCount))
+                                        break;
+                                    float waitTime = 1f;
+                                    if (properties.Length >= 3 && !float.TryParse(properties[2], out waitTime))
+                                        break;
+
+                                    instructions.Add(new(InstructionType.MultiDrop, new InstructionDataMultiDrop([.. dropPositions], Math.Max(float.Epsilon, floatValue), Math.Max(1, dropCount), Math.Max(float.Epsilon, waitTime))));
+                                    break;
+                                }
+                            case "wait":
+                                {
+                                    if (float.TryParse(value, out float floatValue))
+                                        instructions.Add(new(InstructionType.Wait, new InstructionDataWait(Math.Max(float.Epsilon, floatValue))));
+                                    break;
+                                }
+                        }
+                    }
+
+                    sequences.Add(new(name, height, minPlayers, maxPlayers, [.. instructions]));
+                }
         }
 
 
@@ -466,36 +472,42 @@ namespace SequencedDropGameMode
 
 
         // Get BlockDrop Instance
-        [HarmonyPatch(typeof(GameModeBlockDrop), nameof(GameModeBlockDrop.InitMode))]
+        [HarmonyPatch(typeof(Deobf_GameModeBlockDrop), nameof(Deobf_GameModeBlockDrop.InitMode))]
         [HarmonyPostfix]
-        internal static void PostInitMode(GameModeBlockDrop __instance)
+        internal static void PostInitMode(Deobf_GameModeBlockDrop __instance)
             => BlockDrop = __instance;
 
         // Override, prevent vanilla Block Drop from starting and start Sequenced Drop
-        [HarmonyPatch(typeof(GameModeBlockDrop), nameof(GameModeBlockDrop.OnFreezeOver))]
+        [HarmonyPatch(typeof(Deobf_GameModeBlockDrop), nameof(Deobf_GameModeBlockDrop.OnFreezeOver))]
         [HarmonyPrefix]
         internal static bool PreOnFreezeOver()
         {
             if (!SteamManager.Instance.IsLobbyOwner())
                 return false;
 
-            BlockDropBlockManager.Instance.StartCoroutine(Instance.ProcessSequences());
+            Deobf_BlockDropBlockManager.Instance.StartCoroutine(Instance.ProcessSequences());
             foreach (ulong clientId in GameManager.Instance.activePlayers.Keys)
             {
                 ServerSend.DropItem(clientId, 2, SharedObjectManager.Instance.GetNextId(), int.MaxValue);
-                Utility.GiveItem(clientId, 2, int.MaxValue);
+                GiveUtil.GiveItem(clientId, 2, int.MaxValue);
             }
             return false;
         }
 
         // Override, make the game mode timer get set to 10 rather than 1 when ending early
-        [HarmonyPatch(typeof(GameModeBlockDrop), nameof(GameModeBlockDrop.Method_Private_Void_4))]
+        [HarmonyPatch(typeof(Deobf_GameModeBlockDrop), nameof(Deobf_GameModeBlockDrop.Method_Private_Void_4))]
         [HarmonyPrefix]
         internal static bool PreTryEndEarly()
         {
-            if (SteamManager.Instance.IsLobbyOwner() && BlockDrop.modeState == GameModeState.Playing && GameManager.Instance.GetPlayersAlive() <= 1 && BlockDrop.GetFreezeTime() > 10f)
+            if (SteamManager.Instance.IsLobbyOwner() && BlockDrop.modeState == GameMode_ModeState.Playing && GameManager.Instance.GetPlayersAlive() <= 1 && BlockDrop.GetFreezeTime() > 10f)
                 ServerSend.SendGameModeTimer(10f, (int)BlockDrop.modeState);
             return false;
         }
+
+        // Don't send item use packets for revolvers, leads to packet loss in edge cases when Decals attached to dropped blocks are deleted when dropped blocks are merged
+        [HarmonyPatch(typeof(ServerSend), nameof(ServerSend.UseItem))]
+        [HarmonyPrefix]
+        internal static bool PreServerSendUseItem(int param_1)
+            => param_1 != 2;
     }
 }
